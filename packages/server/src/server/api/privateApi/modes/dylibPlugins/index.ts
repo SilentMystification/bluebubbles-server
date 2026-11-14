@@ -1,11 +1,11 @@
 import fs from "fs";
+import path from "path";
 import { waitMs } from "@server/helpers/utils";
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
 import { hideApp } from "@server/api/apple/scripts";
 import { Loggable } from "@server/lib/logging/Loggable";
 import { ProcessSpawner } from "@server/lib/ProcessSpawner";
-import { parseCompanionDylibs } from "./companionDylibs";
 
 export abstract class DylibPlugin extends Loggable {
     tag = "DylibPlugin";
@@ -24,10 +24,7 @@ export abstract class DylibPlugin extends Loggable {
 
     dylibLastErrorTime = 0;
 
-    /**
-     * The config key that holds extra DYLIBs to inject alongside this plugin's own (one path per line).
-     * Plugins that support companions set this. Leave it null for none.
-     */
+    // Config key for extra DYLIBs to inject along with ours. Leave null to skip
     companionConfigKey: string | null = null;
 
     abstract get isEnabled(): boolean;
@@ -39,18 +36,26 @@ export abstract class DylibPlugin extends Loggable {
         this.name = name;
     }
 
-    /**
-     * The companion DYLIBs to inject right now. This is read from the config each time, so a changed
-     * setting applies the next time the parent app is launched.
-     */
+    // Extra DYLIBs from the config (one path per line), read on every launch
     get companionDylibPaths(): string[] {
         if (!this.companionConfigKey) return [];
-        return parseCompanionDylibs(
-            Server().repo.getConfig(this.companionConfigKey),
-            this.dylibPath,
-            filePath => fs.existsSync(filePath),
-            message => this.log.warn(message)
-        );
+
+        const paths: string[] = [];
+        const raw = String(Server().repo.getConfig(this.companionConfigKey) ?? "");
+        for (const line of raw.split("\n")) {
+            const entry = line.trim();
+            if (!entry || entry === this.dylibPath || paths.includes(entry)) continue;
+
+            // A ":" would split the path in DYLD_INSERT_LIBRARIES
+            if (entry.includes(":") || !path.isAbsolute(entry) || !fs.existsSync(entry)) {
+                this.log.warn(`Skipping companion DYLIB (needs an existing absolute path without ":"): ${entry}`);
+                continue;
+            }
+
+            paths.push(entry);
+        }
+
+        return paths;
     }
 
     async stopParentProcess(): Promise<void> {
@@ -111,7 +116,7 @@ export abstract class DylibPlugin extends Loggable {
             throw new Error(`Unable to locate ${this.name} parent process!`);
         }
 
-        // Companion DYLIBs are dropped for the rest of this run if the app fails to launch with them
+        // Stops injecting companions if the app fails to start with them
         let useCompanions = true;
 
         while (this.dylibFailureCounter < 5) {
@@ -174,14 +179,9 @@ export abstract class DylibPlugin extends Loggable {
                     return;
                 }
 
-                // An app that dies within a few seconds of launch with companion DYLIBs (one that can't be
-                // loaded, or that crashes as it loads) is retried without them, so a bad companion can never
-                // keep this plugin's own DYLIB from loading.
+                // Died right after launch with companions, so try again without them
                 if (companions.length > 0 && Date.now() - launchedAt < 5000) {
-                    this.log.error(
-                        `${this.parentApp} failed to start with companion DYLIBs (${companions.join(", ")}). ` +
-                        "Retrying without them."
-                    );
+                    this.log.error(`${this.parentApp} failed to start with companion DYLIBs, retrying without them`);
                     useCompanions = false;
                 }
 

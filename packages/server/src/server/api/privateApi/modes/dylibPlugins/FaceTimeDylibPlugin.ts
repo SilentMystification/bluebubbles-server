@@ -13,7 +13,7 @@ export class FaceTimeDylibPlugin extends DylibPlugin {
 
     bundleIdentifier = "com.apple.FaceTime";
 
-    // Other tools that hook FaceTime can be listed here so they're injected alongside this helper
+    // Setting that lists extra DYLIBs to inject along with this one
     companionConfigKey = "ft_companion_dylibs";
 
     get isEnabled() {
